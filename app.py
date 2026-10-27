@@ -2,10 +2,17 @@
 from flask import Flask, render_template, request, jsonify
 import mysql.connector
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 import calendar
 import os
 
 app = Flask(__name__)
+
+INDIA_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def get_india_now():
+    return datetime.now(INDIA_TZ)
 
 
 def get_db_connection():
@@ -45,16 +52,20 @@ def get_expenses():
     cursor = None
 
     try:
+        today = get_india_now().date()
+        first_day = today - timedelta(days=44)
+        tomorrow = today + timedelta(days=1)
+
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
 
         cursor.execute("""
             SELECT id, expense_date, expense_time, subject, price
             FROM expenses
-            WHERE expense_date >= CURDATE() - INTERVAL 44 DAY
-              AND expense_date <= CURDATE()
+            WHERE expense_date >= %s
+              AND expense_date < %s
             ORDER BY expense_date DESC, expense_time DESC, id DESC
-        """)
+        """, (first_day, tomorrow))
 
         rows = cursor.fetchall()
 
@@ -78,17 +89,12 @@ def get_expenses():
 @app.route("/api/expenses", methods=["POST"])
 def add_expense():
     data = request.get_json(silent=True) or {}
-
     subject = str(data.get("subject", "")).strip()
 
     try:
         price = float(data.get("price", 0))
 
-        if (
-            not subject
-            or len(subject) > 100
-            or not (0 < price <= 99999999)
-        ):
+        if not subject or len(subject) > 100 or not (0 < price <= 99999999):
             raise ValueError
 
     except (ValueError, TypeError):
@@ -96,7 +102,7 @@ def add_expense():
             "error": "Enter a subject and a valid amount greater than zero."
         }), 400
 
-    now = datetime.now()
+    now = get_india_now()
     conn = None
     cursor = None
 
@@ -110,7 +116,7 @@ def add_expense():
             VALUES (%s, %s, %s, %s)
         """, (
             now.date(),
-            now.time().replace(microsecond=0),
+            now.time().replace(tzinfo=None, microsecond=0),
             subject,
             price
         ))
@@ -129,7 +135,6 @@ def add_expense():
                 app.logger.exception("Database rollback failed")
 
         app.logger.exception("Database error while saving expense")
-
         return jsonify({
             "error": "Could not save the expense. Check the Render logs."
         }), 500
@@ -140,8 +145,7 @@ def add_expense():
 
 @app.route("/api/monthly-report", methods=["GET"])
 def monthly_report():
-    # Report on the CURRENT month.
-    today = date.today()
+    today = get_india_now().date()
     first_day_this_month = today.replace(day=1)
 
     if today.month == 12:
@@ -149,9 +153,7 @@ def monthly_report():
     else:
         first_day_next_month = date(today.year, today.month + 1, 1)
 
-    days_in_month = calendar.monthrange(
-        today.year, today.month
-    )[1]
+    days_in_month = calendar.monthrange(today.year, today.month)[1]
 
     conn = None
     cursor = None
@@ -160,7 +162,6 @@ def monthly_report():
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
 
-        # Current month's total and expense count.
         cursor.execute("""
             SELECT
                 COALESCE(SUM(price), 0) AS total,
@@ -171,11 +172,9 @@ def monthly_report():
         """, (first_day_this_month, first_day_next_month))
 
         summary = cursor.fetchone()
-
         total = float(summary["total"])
         count = int(summary["expense_count"])
 
-        # Daily totals for the current month.
         cursor.execute("""
             SELECT
                 DAY(expense_date) AS day,
@@ -201,13 +200,11 @@ def monthly_report():
 
         if daily:
             highest = max(daily, key=lambda row: row["total"])
-
             highest_date = date(
                 today.year,
                 today.month,
                 highest["day"]
             )
-
             highest_day = highest_date.strftime("%d %b")
 
         return jsonify({
@@ -221,7 +218,6 @@ def monthly_report():
 
     except mysql.connector.Error:
         app.logger.exception("Database error while generating monthly report")
-
         return jsonify({
             "error": "Could not generate the monthly report. Check the Render logs."
         }), 500
