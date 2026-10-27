@@ -9,7 +9,6 @@ app = Flask(__name__)
 
 
 def get_db_connection():
-    """Connect to the MySQL database using environment variables."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST", "localhost"),
         port=int(os.getenv("DB_PORT", "3306")),
@@ -22,14 +21,13 @@ def get_db_connection():
 
 
 def close_db(conn=None, cursor=None):
-    """Close database resources safely."""
-    if cursor is not None:
+    if cursor:
         try:
             cursor.close()
         except Exception:
             app.logger.exception("Error closing database cursor")
 
-    if conn is not None:
+    if conn:
         try:
             conn.close()
         except Exception:
@@ -54,7 +52,8 @@ def get_expenses():
             SELECT id, expense_date, expense_time, subject, price
             FROM expenses
             WHERE expense_date >= CURDATE() - INTERVAL 44 DAY
-            ORDER BY expense_date DESC, expense_time DESC
+              AND expense_date <= CURDATE()
+            ORDER BY expense_date DESC, expense_time DESC, id DESC
         """)
 
         rows = cursor.fetchall()
@@ -69,13 +68,7 @@ def get_expenses():
     except mysql.connector.Error:
         app.logger.exception("Database error while loading expenses")
         return jsonify({
-            "error": "Could not load expenses. Check the server logs."
-        }), 500
-
-    except Exception:
-        app.logger.exception("Unexpected error while loading expenses")
-        return jsonify({
-            "error": "An unexpected error occurred while loading expenses."
+            "error": "Could not load expenses. Check the Render logs."
         }), 500
 
     finally:
@@ -85,6 +78,7 @@ def get_expenses():
 @app.route("/api/expenses", methods=["POST"])
 def add_expense():
     data = request.get_json(silent=True) or {}
+
     subject = str(data.get("subject", "")).strip()
 
     try:
@@ -110,45 +104,34 @@ def add_expense():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT INTO expenses
                 (expense_date, expense_time, subject, price)
             VALUES (%s, %s, %s, %s)
-            """,
-            (
-                now.date(),
-                now.time().replace(microsecond=0),
-                subject,
-                price
-            )
-        )
+        """, (
+            now.date(),
+            now.time().replace(microsecond=0),
+            subject,
+            price
+        ))
 
         conn.commit()
 
-        app.logger.info("Expense saved successfully")
         return jsonify({
             "message": "Expense added successfully."
         }), 201
 
     except mysql.connector.Error:
-        app.logger.exception("Database error while saving expense")
-
-        if conn is not None:
+        if conn:
             try:
                 conn.rollback()
-            except Exception:
+            except mysql.connector.Error:
                 app.logger.exception("Database rollback failed")
+
+        app.logger.exception("Database error while saving expense")
 
         return jsonify({
             "error": "Could not save the expense. Check the Render logs."
-        }), 500
-
-    except Exception:
-        app.logger.exception("Unexpected error while saving expense")
-
-        return jsonify({
-            "error": "An unexpected error occurred while saving the expense."
         }), 500
 
     finally:
@@ -157,14 +140,17 @@ def add_expense():
 
 @app.route("/api/monthly-report", methods=["GET"])
 def monthly_report():
+    # Report on the CURRENT month.
     today = date.today()
     first_day_this_month = today.replace(day=1)
-    last_day_previous_month = first_day_this_month - timedelta(days=1)
-    first_day_previous_month = last_day_previous_month.replace(day=1)
+
+    if today.month == 12:
+        first_day_next_month = date(today.year + 1, 1, 1)
+    else:
+        first_day_next_month = date(today.year, today.month + 1, 1)
 
     days_in_month = calendar.monthrange(
-        last_day_previous_month.year,
-        last_day_previous_month.month
+        today.year, today.month
     )[1]
 
     conn = None
@@ -174,6 +160,7 @@ def monthly_report():
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
 
+        # Current month's total and expense count.
         cursor.execute("""
             SELECT
                 COALESCE(SUM(price), 0) AS total,
@@ -181,12 +168,14 @@ def monthly_report():
             FROM expenses
             WHERE expense_date >= %s
               AND expense_date < %s
-        """, (first_day_previous_month, first_day_this_month))
+        """, (first_day_this_month, first_day_next_month))
 
         summary = cursor.fetchone()
+
         total = float(summary["total"])
         count = int(summary["expense_count"])
 
+        # Daily totals for the current month.
         cursor.execute("""
             SELECT
                 DAY(expense_date) AS day,
@@ -196,7 +185,7 @@ def monthly_report():
               AND expense_date < %s
             GROUP BY expense_date
             ORDER BY expense_date
-        """, (first_day_previous_month, first_day_this_month))
+        """, (first_day_this_month, first_day_next_month))
 
         daily_rows = cursor.fetchall()
 
@@ -212,15 +201,17 @@ def monthly_report():
 
         if daily:
             highest = max(daily, key=lambda row: row["total"])
+
             highest_date = date(
-                last_day_previous_month.year,
-                last_day_previous_month.month,
+                today.year,
+                today.month,
                 highest["day"]
             )
+
             highest_day = highest_date.strftime("%d %b")
 
         return jsonify({
-            "month": last_day_previous_month.strftime("%B %Y"),
+            "month": today.strftime("%B %Y"),
             "total": total,
             "count": count,
             "daily_average": round(total / days_in_month, 2),
@@ -230,14 +221,9 @@ def monthly_report():
 
     except mysql.connector.Error:
         app.logger.exception("Database error while generating monthly report")
-        return jsonify({
-            "error": "Could not generate the monthly report. Check server logs."
-        }), 500
 
-    except Exception:
-        app.logger.exception("Unexpected error while generating monthly report")
         return jsonify({
-            "error": "An unexpected error occurred while generating the report."
+            "error": "Could not generate the monthly report. Check the Render logs."
         }), 500
 
     finally:
