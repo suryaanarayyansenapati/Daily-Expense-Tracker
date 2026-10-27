@@ -8,8 +8,8 @@ import os
 app = Flask(__name__)
 
 
-
 def get_db_connection():
+    """Connect to the MySQL database using environment variables."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST", "localhost"),
         port=int(os.getenv("DB_PORT", "3306")),
@@ -20,6 +20,20 @@ def get_db_connection():
         connection_timeout=10
     )
 
+
+def close_db(conn=None, cursor=None):
+    """Close database resources safely."""
+    if cursor is not None:
+        try:
+            cursor.close()
+        except Exception:
+            app.logger.exception("Error closing database cursor")
+
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            app.logger.exception("Error closing database connection")
 
 
 @app.route("/")
@@ -53,13 +67,19 @@ def get_expenses():
         return jsonify(rows)
 
     except mysql.connector.Error:
-        return jsonify({"error": "Could not connect to the database. Check MySQL settings."}), 500
+        app.logger.exception("Database error while loading expenses")
+        return jsonify({
+            "error": "Could not load expenses. Check the server logs."
+        }), 500
+
+    except Exception:
+        app.logger.exception("Unexpected error while loading expenses")
+        return jsonify({
+            "error": "An unexpected error occurred while loading expenses."
+        }), 500
 
     finally:
-        if cursor:
-            cursor.close()
-        if conn and conn.is_connected():
-            conn.close()
+        close_db(conn, cursor)
 
 
 @app.route("/api/expenses", methods=["POST"])
@@ -70,7 +90,11 @@ def add_expense():
     try:
         price = float(data.get("price", 0))
 
-        if not subject or len(subject) > 100 or not (0 < price <= 99999999):
+        if (
+            not subject
+            or len(subject) > 100
+            or not (0 < price <= 99999999)
+        ):
             raise ValueError
 
     except (ValueError, TypeError):
@@ -89,29 +113,49 @@ def add_expense():
         cursor.execute(
             """
             INSERT INTO expenses
-            (expense_date, expense_time, subject, price)
+                (expense_date, expense_time, subject, price)
             VALUES (%s, %s, %s, %s)
             """,
-            (now.date(), now.time().replace(microsecond=0), subject, price)
+            (
+                now.date(),
+                now.time().replace(microsecond=0),
+                subject,
+                price
+            )
         )
 
         conn.commit()
 
-        return jsonify({"message": "Expense added successfully."}), 201
+        app.logger.info("Expense saved successfully")
+        return jsonify({
+            "message": "Expense added successfully."
+        }), 201
 
     except mysql.connector.Error:
+        app.logger.exception("Database error while saving expense")
+
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                app.logger.exception("Database rollback failed")
+
         return jsonify({
-            "error": "Could not save the expense. Check the MySQL connection."
+            "error": "Could not save the expense. Check the Render logs."
+        }), 500
+
+    except Exception:
+        app.logger.exception("Unexpected error while saving expense")
+
+        return jsonify({
+            "error": "An unexpected error occurred while saving the expense."
         }), 500
 
     finally:
-        if cursor:
-            cursor.close()
-        if conn and conn.is_connected():
-            conn.close()
+        close_db(conn, cursor)
 
 
-@app.route("/api/monthly-report")
+@app.route("/api/monthly-report", methods=["GET"])
 def monthly_report():
     today = date.today()
     first_day_this_month = today.replace(day=1)
@@ -119,8 +163,8 @@ def monthly_report():
     first_day_previous_month = last_day_previous_month.replace(day=1)
 
     days_in_month = calendar.monthrange(
-        first_day_previous_month.year,
-        first_day_previous_month.month
+        last_day_previous_month.year,
+        last_day_previous_month.month
     )[1]
 
     conn = None
@@ -157,7 +201,10 @@ def monthly_report():
         daily_rows = cursor.fetchall()
 
         daily = [
-            {"day": int(row["day"]), "total": float(row["total"])}
+            {
+                "day": int(row["day"]),
+                "total": float(row["total"])
+            }
             for row in daily_rows
         ]
 
@@ -166,14 +213,14 @@ def monthly_report():
         if daily:
             highest = max(daily, key=lambda row: row["total"])
             highest_date = date(
-                first_day_previous_month.year,
-                first_day_previous_month.month,
+                last_day_previous_month.year,
+                last_day_previous_month.month,
                 highest["day"]
             )
             highest_day = highest_date.strftime("%d %b")
 
         return jsonify({
-            "month": first_day_previous_month.strftime("%B %Y"),
+            "month": last_day_previous_month.strftime("%B %Y"),
             "total": total,
             "count": count,
             "daily_average": round(total / days_in_month, 2),
@@ -182,13 +229,19 @@ def monthly_report():
         })
 
     except mysql.connector.Error:
-        return jsonify({"error": "Could not generate the monthly report."}), 500
+        app.logger.exception("Database error while generating monthly report")
+        return jsonify({
+            "error": "Could not generate the monthly report. Check server logs."
+        }), 500
+
+    except Exception:
+        app.logger.exception("Unexpected error while generating monthly report")
+        return jsonify({
+            "error": "An unexpected error occurred while generating the report."
+        }), 500
 
     finally:
-        if cursor:
-            cursor.close()
-        if conn and conn.is_connected():
-            conn.close()
+        close_db(conn, cursor)
 
 
 if __name__ == "__main__":
