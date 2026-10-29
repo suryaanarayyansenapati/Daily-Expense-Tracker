@@ -10,7 +10,7 @@ const money = amount =>
         style: "currency",
         currency: "INR",
         minimumFractionDigits: 2
-    }).format(amount);
+    }).format(Number(amount) || 0);
 
 async function fetchJSON(url, options = {}) {
     const response = await fetch(url, {
@@ -18,7 +18,7 @@ async function fetchJSON(url, options = {}) {
         credentials: "same-origin"
     });
 
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
 
     if (response.status === 401) {
         window.location.href = "/login";
@@ -41,6 +41,7 @@ function showMessage(text, isError = false) {
 async function loadExpenses() {
     const expenses = await fetchJSON("/api/expenses");
     const list = document.getElementById("expense-list");
+
     const today = new Intl.DateTimeFormat("en-CA", {
         timeZone: "Asia/Kolkata",
         year: "numeric",
@@ -61,7 +62,7 @@ async function loadExpenses() {
 
     expenses.forEach(expense => {
         if (expense.expense_date === today) {
-            todayTotal += expense.price;
+            todayTotal += Number(expense.price) || 0;
             todayCount++;
         }
 
@@ -85,7 +86,8 @@ async function loadExpenses() {
             hour12: true
         });
 
-        dateTime.textContent = `${expense.expense_date} · ${normalTime}`;
+        dateTime.textContent =
+            `${expense.expense_date} · ${normalTime}`;
         amount.textContent = money(expense.price);
 
         details.append(name, dateTime);
@@ -93,50 +95,89 @@ async function loadExpenses() {
         list.appendChild(item);
     });
 
-    document.getElementById("today-total").textContent = money(todayTotal);
+    document.getElementById("today-total").textContent =
+        money(todayTotal);
     document.getElementById("expense-count").textContent =
         `${todayCount} expense${todayCount === 1 ? "" : "s"} today`;
 }
 
 async function loadMonthlyReport() {
-    const report = await fetchJSON("/api/monthly-report");
+    const chart = document.getElementById("chart-bars");
 
-    document.getElementById("report-month").textContent = report.month;
-    document.getElementById("month-total").textContent = money(report.total);
-    document.getElementById("month-count").textContent = report.count;
-    document.getElementById("daily-average").textContent =
-        money(report.daily_average);
-    document.getElementById("highest-day").textContent =
-        report.highest_day || "—";
+    try {
+        const report = await fetchJSON("/api/monthly-report");
 
-    renderChart(report);
+        document.getElementById("report-month").textContent =
+            report.month;
+        document.getElementById("month-total").textContent =
+            money(report.total);
+        document.getElementById("month-count").textContent =
+            report.count;
+        document.getElementById("daily-average").textContent =
+            money(report.daily_average);
+        document.getElementById("highest-day").textContent =
+            report.highest_day || "—";
+
+        renderChart(report);
+    } catch (error) {
+        if (chart) {
+            chart.replaceChildren();
+            const note = document.createElement("p");
+            note.className = "empty";
+            note.textContent = "Unable to load graph. Please refresh.";
+            chart.appendChild(note);
+        }
+        throw error;
+    }
 }
 
 function renderChart(report) {
     const chart = document.getElementById("chart-bars");
     chart.replaceChildren();
 
-   const [month, year] = report.month.split(" ");
+    // Expected report.month format: "October 2026"
+    const parts = String(report.month || "").trim().split(/\s+/);
+    const month = parts[0];
+    const year = Number(parts[1]);
+
     const monthIndex = new Date(`${month} 1, ${year}`).getMonth();
+
+    if (
+        parts.length !== 2 ||
+        !Number.isFinite(year) ||
+        Number.isNaN(monthIndex)
+    ) {
+        chart.textContent = "Invalid report month.";
+        return;
+    }
+
     const daysInMonth =
-        new Date(Number(year), monthIndex + 1, 0).getDate();
+        new Date(year, monthIndex + 1, 0).getDate();
 
     const totalsByDay = new Map(
-        report.daily.map(item => [item.day, item.total])
+        (report.daily || []).map(item => [
+            Number(item.day),
+            Number(item.total) || 0
+        ])
     );
 
     const maxTotal = Math.max(1, ...totalsByDay.values());
 
     for (let day = 1; day <= daysInMonth; day++) {
         const total = totalsByDay.get(day) || 0;
+
         const column = document.createElement("div");
         column.className = "chart-day";
         column.title = `${day} ${month}: ${money(total)}`;
 
         const bar = document.createElement("div");
         bar.className = "chart-bar";
-        bar.style.height = `${Math.max(3, (total / maxTotal) * 100)}%`;
-        bar.setAttribute("aria-label", `${money(total)} on day ${day}`);
+        bar.style.height =
+            `${Math.max(3, (total / maxTotal) * 100)}%`;
+        bar.setAttribute(
+            "aria-label",
+            `${money(total)} on day ${day}`
+        );
 
         const label = document.createElement("span");
         label.textContent = day;
@@ -145,7 +186,7 @@ function renderChart(report) {
         chart.appendChild(column);
     }
 
-    if (report.count === 0) {
+    if (Number(report.count) === 0) {
         const note = document.createElement("p");
         note.className = "empty";
         note.textContent = "No expenses recorded for this month.";
@@ -155,7 +196,10 @@ function renderChart(report) {
 
 async function refreshDashboard() {
     try {
-        await Promise.all([loadExpenses(), loadMonthlyReport()]);
+        await Promise.all([
+            loadExpenses(),
+            loadMonthlyReport()
+        ]);
     } catch (error) {
         if (error.message !== "Please log in again.") {
             showMessage(error.message, true);
@@ -197,11 +241,13 @@ form.addEventListener("submit", async event => {
 
 async function addLogoutButton() {
     const header = document.querySelector("header");
+
     if (!header || document.getElementById("logout-button")) return;
 
     try {
         const user = await fetchJSON("/api/me");
         const area = document.createElement("div");
+
         area.style.display = "flex";
         area.style.alignItems = "center";
         area.style.justifyContent = "space-between";
@@ -219,6 +265,7 @@ async function addLogoutButton() {
 
         button.addEventListener("click", async () => {
             button.disabled = true;
+
             try {
                 await fetchJSON("/api/logout", { method: "POST" });
                 window.location.href = "/login";
