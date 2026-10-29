@@ -116,7 +116,7 @@ function renderChart(report) {
     const chart = document.getElementById("chart-bars");
     chart.replaceChildren();
 
-    const [year, month] = report.month.split(" ");
+   const [month, year] = report.month.split(" ");
     const monthIndex = new Date(`${month} 1, ${year}`).getMonth();
     const daysInMonth =
         new Date(Number(year), monthIndex + 1, 0).getDate();
